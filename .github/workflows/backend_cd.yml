@@ -1,0 +1,90 @@
+name: CD - Deploy Backend Services to AKS
+
+on:
+  workflow_dispatch:
+    inputs:
+      resource_group_name:
+        description: "Azure Resource Group for AKS"
+        required: true
+        default: "sit722-task8-rg"
+      aks_cluster_name:
+        description: "AKS cluster name"
+        required: true
+        default: "sit722-aks"
+      image_tag:
+        description: "Image tag to deploy (use CI tag or 'latest')"
+        required: true
+        default: "latest"
+      namespace:
+        description: "Kubernetes namespace to deploy into"
+        required: true
+        default: "backend"
+
+env:
+  ACR_LOGIN_SERVER: ${{ secrets.AZURE_CONTAINER_REGISTRY }}
+
+jobs:
+  deploy_backends:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Azure Login (Service Principal JSON)
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Set AKS context
+        run: |
+          az aks get-credentials \
+            --resource-group "${{ github.event.inputs.resource_group_name }}" \
+            --name "${{ github.event.inputs.aks_cluster_name }}" \
+            --overwrite-existing
+          kubectl get nodes
+
+      - name: Ensure namespace exists
+        run: |
+          NS="${{ github.event.inputs.namespace }}"
+          kubectl get ns "$NS" >/dev/null 2>&1 || kubectl create ns "$NS"
+
+      - name: Create/refresh imagePullSecret for ACR
+        run: |
+          NS="${{ github.event.inputs.namespace }}"
+          kubectl delete secret acr-auth -n "$NS" --ignore-not-found
+          kubectl create secret docker-registry acr-auth \
+            --docker-server="${{ secrets.AZURE_CONTAINER_REGISTRY }}" \
+            --docker-username="${{ secrets.ACR_USERNAME }}" \
+            --docker-password="${{ secrets.ACR_PASSWORD }}" \
+            -n "$NS"
+
+      - name: Patch default SA to use imagePullSecret
+        run: |
+          NS="${{ github.event.inputs.namespace }}"
+          kubectl patch serviceaccount default \
+            -p '{"imagePullSecrets":[{"name":"acr-auth"}]}' \
+            -n "$NS" --type=merge
+
+      - name: Apply repo Kubernetes manifests (if present)
+        run: |
+          NS="${{ github.event.inputs.namespace }}"
+          if [ -d "k8s/backend" ]; then
+            kubectl apply -R -f k8s/backend -n "$NS"
+          else
+            echo "No k8s/backend folder found; skipping manifest apply."
+          fi
+
+      - name: Set images for Product & Order services
+        run: |
+          NS="${{ github.event.inputs.namespace }}"
+          TAG="${{ github.event.inputs.image_tag }}"
+          REG="${{ secrets.AZURE_CONTAINER_REGISTRY }}"
+          kubectl set image deployment/product-api product-api="${REG}/product_service:${TAG}" -n "$NS" || true
+          kubectl set image deployment/order-api   order-api="${REG}/order_service:${TAG}"   -n "$NS" || true
+
+      - name: Wait for rollout
+        run: |
+          NS="${{ github.event.inputs.namespace }}"
+          kubectl rollout status deployment/product-api -n "$NS" --timeout=180s || true
+          kubectl rollout status deployment/order-api   -n "$NS" --timeout=180s || true
+          kubectl get pods -n "$NS" -o wide
