@@ -9,10 +9,10 @@ on:
       - '.github/workflows/frontend_ci.yml'
 
 env:
-  # Secrets you must set in the repo:
-  #   AZURE_CREDENTIALS .......... full SP JSON
-  #   AZURE_CONTAINER_REGISTRY ... e.g. sit722acr19861.azurecr.io
-  #   AZURE_ACR_NAME ............. e.g. sit722acr19861
+  # Must exist in repo Settings → Secrets and variables → Actions
+  # AZURE_CREDENTIALS ........ full SP JSON
+  # AZURE_CONTAINER_REGISTRY . e.g. sit722acr19861.azurecr.io
+  # AZURE_ACR_NAME ........... e.g. sit722acr19861
   ACR_LOGIN_SERVER: ${{ secrets.AZURE_CONTAINER_REGISTRY }}
   IMAGE_TAG: ${{ github.sha }}-${{ github.run_id }}
 
@@ -23,19 +23,49 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Azure Login
+      - name: Azure Login (SP JSON)
         uses: azure/login@v1
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      # IMPORTANT: use registry *name* here (no .azurecr.io)
-      - name: Login to Azure Container Registry
+      # Quick sanity checks so failures are obvious
+      - name: Validate inputs / show ACR info
+        shell: bash
+        run: |
+          set -e
+          echo "ACR_LOGIN_SERVER=${ACR_LOGIN_SERVER}"
+          echo "AZURE_ACR_NAME=${{ secrets.AZURE_ACR_NAME }}"
+          echo "IMAGE_TAG=${IMAGE_TAG}"
+          echo "== az account show =="
+          az account show -o table
+          echo "== az acr show =="
+          az acr show -n "${{ secrets.AZURE_ACR_NAME }}" -o table
+          echo "== repo files =="
+          ls -la
+          echo "== frontend dir =="
+          ls -la frontend || true
+          test -f frontend/Dockerfile || (echo "::error ::Missing frontend/Dockerfile" && exit 1)
+
+      # IMPORTANT: use registry NAME (no .azurecr.io)
+      - name: Login to ACR (az)
         run: az acr login --name "${{ secrets.AZURE_ACR_NAME }}"
 
-      - name: Build and Push Frontend Image
+      - name: Build image (explicit Dockerfile path)
+        shell: bash
         run: |
-          docker build -t ${{ env.ACR_LOGIN_SERVER }}/frontend:latest ./frontend
-          docker push ${{ env.ACR_LOGIN_SERVER }}/frontend:latest
+          set -e
+          docker build \
+            -f frontend/Dockerfile \
+            -t "${ACR_LOGIN_SERVER}/frontend:${IMAGE_TAG}" \
+            -t "${ACR_LOGIN_SERVER}/frontend:latest" \
+            ./frontend
+
+      - name: Push tags
+        shell: bash
+        run: |
+          set -e
+          docker push "${ACR_LOGIN_SERVER}/frontend:${IMAGE_TAG}"
+          docker push "${ACR_LOGIN_SERVER}/frontend:latest"
 
       - name: Logout from Azure
         if: always()
