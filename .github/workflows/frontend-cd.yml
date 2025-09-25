@@ -1,24 +1,25 @@
+# week08/.github/workflows/frontend-cd.yml
 name: CD - Deploy Frontend to AKS
 
 on:
   workflow_dispatch:
     inputs:
       product_api_ip:
-        description: 'External URL for Product API (e.g., http://20.11.77.52:8000)'
+        description: "External URL for Product API (e.g., http://20.11.77.52:8000)"
         required: true
-        default: 'http://<ip>:8000'
+        default: "http://<ip>:8000"
       order_api_ip:
-        description: 'External URL for Order API (e.g., http://4.254.15.75:8001)'
+        description: "External URL for Order API (e.g., http://4.254.15.75:8001)"
         required: true
-        default: 'http://<ip>:8001'
+        default: "http://<ip>:8001"
       aks_cluster_name:
-        description: 'AKS cluster name'
+        description: "AKS cluster name"
         required: true
-        default: 'sit722-aks'
+        default: "sit722-aks"
       aks_resource_group:
-        description: 'AKS resource group'
+        description: "AKS resource group"
         required: true
-        default: 'sit722-task8-rg'
+        default: "sit722-task8-rg"
 
   workflow_call:
     inputs:
@@ -40,7 +41,7 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      # IMPORTANT: registry **name** here (no .azurecr.io)
+      # IMPORTANT: registry *name* here (no .azurecr.io)
       - name: Login to ACR
         run: az acr login --name "${{ secrets.AZURE_ACR_NAME }}"
 
@@ -51,8 +52,8 @@ jobs:
           test -f frontend/main.js || { echo "::error ::frontend/main.js missing"; exit 1; }
           sed -i "s|_PRODUCT_API_URL_|${{ inputs.product_api_ip }}|g" frontend/main.js
           sed -i "s|_ORDER_API_URL_|${{ inputs.order_api_ip }}|g" frontend/main.js
-          echo " ----- main.js after injection -----"
-          tail -n +1 frontend/main.js | sed -n '1,50p'
+          echo "----- preview of main.js after injection -----"
+          head -n 50 frontend/main.js
 
       - name: Build & push frontend image
         shell: bash
@@ -70,13 +71,26 @@ jobs:
           resource-group: ${{ inputs.aks_resource_group }}
           cluster-name:   ${{ inputs.aks_cluster_name }}
 
+      # ===== FIXED BLOCK =====
       - name: Deploy frontend Service/Deployment
         shell: bash
         run: |
           set -e
+          # Apply your Kubernetes manifest(s)
           kubectl apply -f k8s/frontend.yaml
-          kubectl rollout status deployment/frontend-deploy -w --timeout=180s
+
+          # Update the running Deployment to the new image
+          # Your container name is 'frontend-container'
+          kubectl set image deployment/frontend \
+            frontend-container=${{ secrets.AZURE_CONTAINER_REGISTRY }}/frontend:latest \
+            --record || true
+
+          # Wait for the correct deployment name ('frontend') to finish rolling out
+          kubectl rollout status deployment/frontend --timeout=180s
+
+          # Show current state
           kubectl get svc,deploy,pods -o wide
+      # =======================
 
       - name: Logout Azure
         if: always()
